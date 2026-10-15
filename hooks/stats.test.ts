@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { parseProbe, sparkline } from './stats'
+import { bytes, parseNettop, parseProbe, parseRusage, rates, sparkline } from './stats'
 
 // 900 is the engine-side spawner; 950/951 are the probe's own sh and ps.
 const PROBE_OUT = `900
@@ -42,4 +42,38 @@ test('leaves out the probe sh and ps under the spawner', () => {
 
 test('sparkline scales to the max', () => {
   expect(sparkline([0, 50, 100])).toBe('▁▅█')
+})
+
+test('rusage lines become disk and energy counters per pid', () => {
+  const c = parseRusage('800 1000 2000 5000000000\n900 0 0 0\n')
+  expect(c.get(800)).toEqual([1000, 2000, 5000000000])
+  expect(c.size).toBe(2)
+})
+
+test('nettop lines become byte counters, names with dots and spaces included', () => {
+  const c = parseNettop(',bytes_in,bytes_out,\nclaude bg-spare.800,100,50,\ncom.apple.x.900,7,8,\n')
+  expect(c.get(800)).toEqual([100, 50])
+  expect(c.get(900)).toEqual([7, 8])
+})
+
+test('rates are per second over pids both samples hold', () => {
+  const prev = new Map([[1, [0, 0]], [2, [10, 10]], [3, [5, 5]]])
+  const cur = new Map([[1, [100, 50]], [2, [30, 10]], [4, [9, 9]]])
+  const { total, perPid } = rates(prev, cur, 2, [1, 2, 3, 4])
+  expect(total).toEqual([60, 25])
+  expect(perPid.get(2)).toEqual([10, 0])
+  expect(perPid.has(3)).toBe(false)
+})
+
+test('bytes reads like Activity Monitor', () => {
+  expect(bytes(512)).toBe('512 B')
+  expect(bytes(1536)).toBe('1.5 KB')
+  expect(bytes(5 * 1024 * 1024)).toBe('5.0 MB')
+})
+
+test('the io probes the mod starts are left out, a nettop the person runs is kept', () => {
+  const out = PROBE_OUT.replace('  950   900   0.0    800 00:00 /bin/sh', '  950   800   0.0    800 00:00 /usr/bin/nettop')
+    .replace('  951   950   0.0    900 00:00 ps', '  951   811   0.0    900 00:00 nettop')
+  const s = parseProbe(out.replace(/^900\n/, '811\n'))
+  expect(s.procs.map(p => p.pid)).toEqual([800, 810, 811, 951, 900])
 })

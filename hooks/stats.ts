@@ -23,7 +23,7 @@ const shortName = (name: string) => {
 export function parseProbe(stdout: string): Snapshot {
   const [spawner = '', ncpu, memsize, loadavg = '', ...rows] = stdout.trim().split('\n')
 
-  const all = new Map<number, Omit<Proc, 'depth'>>()
+  const all = new Map<number, Omit<Proc, 'depth' | 'watts'>>()
   for (const row of rows) {
     const m = ROW.exec(row)
     if (!m) continue
@@ -45,7 +45,7 @@ export function parseProbe(stdout: string): Snapshot {
   }
   if (rootPid <= 1) throw new Error(`no claude process above pid ${spawner}`)
 
-  const children = new Map<number, Omit<Proc, 'depth'>[]>()
+  const children = new Map<number, Omit<Proc, 'depth' | 'watts'>[]>()
   for (const p of all.values()) {
     if (!children.has(p.ppid)) children.set(p.ppid, [])
     children.get(p.ppid)!.push(p)
@@ -59,9 +59,12 @@ export function parseProbe(stdout: string): Snapshot {
     if (shortName(sh.name) === 'sh' && ps) probePids.add(sh.pid).add(ps.pid)
   }
   const procs: Proc[] = []
-  const walk = (p: Omit<Proc, 'depth'>, depth: number) => {
-    if (probePids.has(p.pid)) return
-    procs.push({ ...p, depth, name: shortName(p.name) })
+  // The io probes (nettop, and python under sh) are the session's direct children
+  const isIoProbe = (p: Omit<Proc, 'depth' | 'watts'>, depth: number) =>
+    depth === 1 && ['nettop', 'Python', 'python3'].includes(shortName(p.name))
+  const walk = (p: Omit<Proc, 'depth' | 'watts'>, depth: number) => {
+    if (probePids.has(p.pid) || isIoProbe(p, depth)) return
+    procs.push({ ...p, depth, name: shortName(p.name), watts: null })
     const kids = [...(children.get(p.pid) ?? [])].sort((a, b) => b.cpu - a.cpu || b.rssKb - a.rssKb)
     for (const k of kids) walk(k, depth + 1)
   }
@@ -87,3 +90,82 @@ export function sparkline(values: readonly number[], max?: number): string {
 }
 
 export const gb = (kb: number) => (kb / 1048576).toFixed(kb >= 10485760 ? 0 : 1)
+
+// Disk and energy per process come from proc_pid_rusage (what Activity Monitor
+// reads), called through the system python. It runs only where the Command
+// Line Tools are installed, so a bare Mac never sees an install prompt; there
+// the probe prints nothing and the pane says why.
+const RUSAGE_PY = `
+import ctypes, sys
+lib = ctypes.CDLL('/usr/lib/libproc.dylib')
+class RU(ctypes.Structure):
+    _fields_ = [('uuid', ctypes.c_uint8 * 16)] + [('f%d' % i, ctypes.c_uint64) for i in range(56)]
+for pid in map(int, sys.argv[1:]):
+    r = RU()
+    if lib.proc_pid_rusage(pid, 6, ctypes.byref(r)) == 0:
+        print(pid, r.f16, r.f17, r.f40)
+    elif lib.proc_pid_rusage(pid, 4, ctypes.byref(r)) == 0:
+        print(pid, r.f16, r.f17, -1)
+`
+// Fields after the uuid: 16 diskio_bytesread, 17 diskio_byteswritten, and in
+// rusage_info_v6 (macOS 13+) 40 energy_nj. v4's billed_energy reads 0 on Apple
+// silicon, so before v6 the energy column is -1, unknown.
+
+export const ioProbe = (pids: readonly number[]) => ({
+  argv: ['/bin/sh', '-c', 'xcode-select -p >/dev/null 2>&1 && exec /usr/bin/python3 -I -c "$PY" "$@"', 'sh', ...pids.map(String)],
+  env: { PY: RUSAGE_PY },
+})
+
+// One nettop sample takes about 5 s, so it runs beside the 2 s sampler, not in it
+export const NET_PROBE = ['/usr/bin/nettop', '-P', '-L', '1', '-x', '-J', 'bytes_in,bytes_out'] as const
+
+export type Counters = Map<number, number[]>
+
+/** "pid read written energyNj" lines: cumulative disk bytes and energy (-1 when unknown). */
+export function parseRusage(stdout: string): Counters {
+  const out: Counters = new Map()
+  for (const line of stdout.trim().split('\n')) {
+    const [pid, ...rest] = line.trim().split(/\s+/).map(Number)
+    if (pid && rest.length === 3) out.set(pid, rest)
+  }
+  return out
+}
+
+/** nettop's "name.pid,bytes_in,bytes_out," lines: cumulative bytes per process. */
+export function parseNettop(stdout: string): Counters {
+  const out: Counters = new Map()
+  for (const line of stdout.split('\n')) {
+    const m = /\.(\d+),(\d+),(\d+),$/.exec(line.trim())
+    if (m) out.set(Number(m[1]), [Number(m[2]), Number(m[3])])
+  }
+  return out
+}
+
+/**
+ * Per-second rates between two counter samples, over the pids in `pids` that
+ * both samples hold (a process that started or ended in between is skipped,
+ * as is a counter that went backwards). Returns the summed rates and each pid's.
+ */
+export function rates(prev: Counters, cur: Counters, seconds: number, pids: Iterable<number>) {
+  const perPid = new Map<number, number[]>()
+  let total: number[] = []
+  for (const pid of pids) {
+    const a = prev.get(pid)
+    const b = cur.get(pid)
+    if (!a || !b || seconds <= 0) continue
+    const r = b.map((v, i) => Math.max(0, v - (a[i] ?? v)) / seconds)
+    perPid.set(pid, r)
+    total = r.map((v, i) => v + (total[i] ?? 0))
+  }
+  return { total, perPid }
+}
+
+export function bytes(n: number): string {
+  const units = ['B', 'KB', 'MB', 'GB']
+  let i = 0
+  while (n >= 1000 && i < units.length - 1) {
+    n /= 1024
+    i++
+  }
+  return `${n >= 100 || i === 0 ? n.toFixed(0) : n.toFixed(1)} ${units[i]}`
+}
