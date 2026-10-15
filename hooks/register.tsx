@@ -7,6 +7,8 @@ import { PROBE, gb, parseProbe, sparkline } from './stats'
 const PANE = 'session-stats'
 const PERIOD_MS = 2000
 const HISTORY = 120
+// Each history in the bar is at most this many cells (one minute of samples)
+const BAR_SPAN = 30
 const BAR_KEY = 'bar'
 const stats = atom({ plugin: 'session-stats', key: 'stats' } as const, {
   snapshot: null,
@@ -98,7 +100,7 @@ export const register: Register = on => {
     const { snapshot: s, cpuHistory, ramHistory } = await read($, stats)
     const width = e.props.bodyColumns ?? e.viewport?.columns ?? 80
     // "⚙ CPU 100% " + " " + " RAM 10.0G " + " " is 26 cells around the two histories
-    const span = Math.max(6, Math.min(HISTORY, Math.floor((width - 26) / 2)))
+    const span = Math.max(6, Math.min(BAR_SPAN, Math.floor((width - 26) / 2)))
     const cpu = sparkline(cpuHistory.slice(-span))
     const ram = sparkline(ramHistory.slice(-span))
 

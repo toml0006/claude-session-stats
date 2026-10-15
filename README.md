@@ -18,7 +18,7 @@ It samples every 2 seconds while the pane or the bar is showing, and stops when 
 ⚙ CPU  12% ▁▂▂▃▅▃▂▁··········  RAM  0.8G ▃▃▃▄▄▅▅▅··········
 ```
 
-Each history spans its half of the line from the start and fills left to
+Each history is up to 30 cells wide (one minute) from the start and fills left to
 right, then scrolls. Click the strip to open the full pane. The setting is remembered across sessions;
 `/session-stats bar on` and `/session-stats bar off` set it directly.
 
