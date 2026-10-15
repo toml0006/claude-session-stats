@@ -1,0 +1,9 @@
+{
+  "name": "session-stats",
+  "version": "0.1.0",
+  "description": "/session-stats opens a live pane with CPU, RAM and the process tree of this Claude session",
+  "author": { "name": "Jackson Tomlinson" },
+  "repository": "https://github.com/toml0006/claude-session-stats",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
