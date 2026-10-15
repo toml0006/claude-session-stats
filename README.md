@@ -4,7 +4,7 @@ A Claude Code mod that shows what your current session is costing your machine.
 Type `/session-stats` and a pane opens with:
 
 - CPU and RAM for the session's whole process tree (the `claude` process plus every
-  shell, build, test runner and stdio MCP server it started), with 2-minute sparklines
+  shell, build, test runner and stdio MCP server it started), with sparklines of up to the last 4 minutes
 - the session's share of your cores and memory, process count, uptime and load average
 - a process table, indented as a tree, busiest first
 
@@ -15,10 +15,11 @@ It samples every 2 seconds while the pane or the bar is showing, and stops when 
 `/session-stats bar` toggles a one-line strip above the prompt:
 
 ```
-⚙ CPU ▁▂▂▃▅▃▂▁ 12% · RAM ▃▃▃▄▄▅▅▅ 0.8G
+⚙ CPU  12% ▁▂▂▃▅▃▂▁··········  RAM  0.8G ▃▃▃▄▄▅▅▅··········
 ```
 
-Click it to open the full pane. The setting is remembered across sessions;
+Each history spans its half of the line from the start and fills left to
+right, then scrolls. Click the strip to open the full pane. The setting is remembered across sessions;
 `/session-stats bar on` and `/session-stats bar off` set it directly.
 
 ## Install

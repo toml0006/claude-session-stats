@@ -6,7 +6,7 @@ import { PROBE, gb, parseProbe, sparkline } from './stats'
 
 const PANE = 'session-stats'
 const PERIOD_MS = 2000
-const HISTORY = 60
+const HISTORY = 120
 const BAR_KEY = 'bar'
 const stats = atom({ plugin: 'session-stats', key: 'stats' } as const, {
   snapshot: null,
@@ -88,23 +88,29 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // The strip above the prompt: one Button, so a click anywhere on it opens the pane
+  // The strip above the prompt: numbers first, then each history at its full
+  // width from the first sample, filling left to right and then scrolling. One
+  // Button, so a click anywhere on it opens the pane.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || !(await read($, isBarOn))) return next(e)
 
     const { Button, Text } = $.ui.resolve(e)
     const { snapshot: s, cpuHistory, ramHistory } = await read($, stats)
     const width = e.props.bodyColumns ?? e.viewport?.columns ?? 80
-    const spark = Math.max(6, Math.min(30, Math.floor((width - 34) / 2)))
+    // "⚙ CPU 100% " + " " + " RAM 10.0G " + " " is 26 cells around the two histories
+    const span = Math.max(6, Math.min(HISTORY, Math.floor((width - 26) / 2)))
+    const cpu = sparkline(cpuHistory.slice(-span))
+    const ram = sparkline(ramHistory.slice(-span))
 
     return (
       <Button key="open-pane" plain onPress={() => void openPane($)}>
         <Text dimColor>⚙ CPU </Text>
-        <Text color="cyan">{sparkline(cpuHistory.slice(-spark))}</Text>
-        <Text color={cpuColor(s?.cpu ?? 0)}> {s ? `${s.cpu.toFixed(0)}%` : '…'}</Text>
-        <Text dimColor> · RAM </Text>
-        <Text color="magenta">{sparkline(ramHistory.slice(-spark))}</Text>
-        <Text color={ramColor(s?.rssKb ?? 0)}> {s ? `${gb(s.rssKb)}G` : '…'}</Text>
+        <Text color={cpuColor(s?.cpu ?? 0)}>{(s ? `${s.cpu.toFixed(0)}%` : '…').padStart(4)} </Text>
+        <Text color="cyan">{cpu}</Text>
+        <Text dimColor>{'·'.repeat(span - cpu.length)}  RAM </Text>
+        <Text color={ramColor(s?.rssKb ?? 0)}>{(s ? `${gb(s.rssKb)}G` : '…').padStart(5)} </Text>
+        <Text color="magenta">{ram}</Text>
+        <Text dimColor>{'·'.repeat(span - ram.length)}</Text>
       </Button>
     )
   })
