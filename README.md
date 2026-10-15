@@ -8,7 +8,18 @@ Type `/session-stats` and a pane opens with:
 - the session's share of your cores and memory, process count, uptime and load average
 - a process table, indented as a tree, busiest first
 
-It refreshes every 2 seconds while the pane is open and stops when you close it.
+It samples every 2 seconds while the pane or the bar is showing, and stops when neither is.
+
+### Bar mode
+
+`/session-stats bar` toggles a one-line strip above the prompt:
+
+```
+⚙ CPU ▁▂▂▃▅▃▂▁ 12% · RAM ▃▃▃▄▄▅▅▅ 0.8G
+```
+
+Click it to open the full pane. The setting is remembered across sessions;
+`/session-stats bar on` and `/session-stats bar off` set it directly.
 
 ## Install
 

@@ -28,6 +28,6 @@ export type Stats = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'session-stats': { stats: Stats }
+    'session-stats': { stats: Stats; isBarOn: boolean }
   }
 }
