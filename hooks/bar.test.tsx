@@ -54,3 +54,48 @@ test('bar off leaves the space above the prompt to the engine', async ($, on) =>
   expect(await ui.find({ key: 'open-pane' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /engine/ })).toBeDefined()
 })
+
+// What 0.1.0 kept in $.state: the host keeps it across a reload or an update
+const OLD_STATS = {
+  snapshot: {
+    rootPid: 800, rootName: 'claude', cores: 10, memBytes: 17179869184, load: [1, 1, 1], cpu: 5, rssKb: 600000,
+    procs: [{ pid: 800, ppid: 1, depth: 0, cpu: 5, rssKb: 600000, elapsed: '10:00', name: 'claude' }],
+  },
+  error: null,
+  cpuHistory: [5, 6],
+  ramHistory: [600000, 600000],
+}
+
+test('the pane still draws from stats an older version kept', async ($, on) => {
+  world(on)
+  // Beneath the mod, the test answers its read of stats with what 0.1.0 wrote
+  on('state.get', { plugin: 'session-stats', key: 'stats' }, () => ({ value: { value: OLD_STATS as never, version: 1 } }))
+  const ui = await $.ui.mount({
+    plugin: 'session-stats',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'session-stats',
+    props: { bodyColumns: 60 } as never,
+  })
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn).toContain('NET ')
+  expect(drawn).toContain('claude')
+})
+
+test('stop closes the pane, turns the bar off and keeps it off', async ($, on) => {
+  const opened = world(on)
+  const closed: string[] = []
+  on('ui.close', ($, e) => {
+    closed.push(e.id)
+    return { value: undefined }
+  })
+  await $.command.run(run('bar on'))
+  await $.command.run(run(''))
+  expect(opened).toEqual(['session-stats'])
+
+  const result = await $.command.run(run('stop'))
+  expect(result.text).toContain('stopped')
+  expect(closed).toEqual(['session-stats'])
+  const ui = await $.ui.mount({ plugin: 'session-stats', surface: 'terminal', ...BAR })
+  expect(await ui.find({ key: 'open-pane' })).toBeUndefined()
+})

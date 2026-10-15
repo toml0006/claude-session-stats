@@ -24,6 +24,11 @@ Each history is up to 30 cells wide (one minute) from the start and fills left t
 right, then scrolls. Click the strip to open the full pane. The setting is remembered across sessions;
 `/session-stats bar on` and `/session-stats bar off` set it directly.
 
+### Stopping it
+
+`/session-stats stop` (or `off`, or `kill`) closes the pane, turns the bar off and
+stops all sampling, so the mod runs nothing until you call it again.
+
 ## Install
 
 At the prompt of a Claude Code terminal session:

@@ -11,7 +11,7 @@ const HISTORY = 120
 // Each history in the bar is at most this many cells (one minute of samples)
 const BAR_SPAN = 30
 const BAR_KEY = 'bar'
-const stats = atom({ plugin: 'session-stats', key: 'stats' } as const, {
+const EMPTY: Stats = {
   snapshot: null,
   error: null,
   cpuHistory: [],
@@ -22,7 +22,8 @@ const stats = atom({ plugin: 'session-stats', key: 'stats' } as const, {
   netHistory: [],
   diskHistory: [],
   energyHistory: [],
-} as Stats)
+}
+const stats = atom({ plugin: 'session-stats', key: 'stats' } as const, EMPTY)
 const isBarOn = atom({ plugin: 'session-stats', key: 'isBarOn' } as const, false)
 
 const cpuColor = (cpu: number) => (cpu >= 100 ? 'red' : cpu >= 50 ? 'yellow' : 'green')
@@ -39,6 +40,16 @@ let prevNet: { at: number; counters: Counters } | undefined
 let isNetBusy = false
 
 const push = (list: readonly number[], v: number) => [...list, v].slice(-HISTORY)
+
+// The host keeps $.state across reloads and updates, so a value written by an
+// older version can lack fields this one reads: fill them in on every read.
+async function readStats($: EngineInterface): Promise<Stats> {
+  return { ...EMPTY, ...(await read($, stats)) }
+}
+
+async function updateStats($: EngineInterface, fn: (s: Stats) => Stats) {
+  await update($, stats, s => fn({ ...EMPTY, ...s }))
+}
 
 async function sample($: EngineInterface) {
   try {
@@ -64,7 +75,7 @@ async function sample($: EngineInterface) {
     }
     prevRusage = usage.size > 0 ? { at, counters: usage } : undefined
 
-    await update($, stats, s => ({
+    await updateStats($, s => ({
       ...s,
       snapshot: snap,
       error: null,
@@ -77,7 +88,7 @@ async function sample($: EngineInterface) {
     }))
     if (!isNetBusy) void sampleNet($, pids)
   } catch (err) {
-    await update($, stats, s => ({ ...s, error: String(err) }))
+    await updateStats($, s => ({ ...s, error: String(err) }))
   }
 }
 
@@ -89,7 +100,7 @@ async function sampleNet($: EngineInterface, pids: readonly number[]) {
     if (prevNet) {
       const { total } = rates(prevNet.counters, counters, (at - prevNet.at) / 1000, pids)
       const net = { bytesIn: total[0] ?? 0, bytesOut: total[1] ?? 0 }
-      await update($, stats, s => ({ ...s, net, netHistory: push(s.netHistory, net.bytesIn + net.bytesOut) }))
+      await updateStats($, s => ({ ...s, net, netHistory: push(s.netHistory, net.bytesIn + net.bytesOut) }))
     }
     prevNet = { at, counters }
   } catch {
@@ -110,6 +121,18 @@ async function syncSampler($: EngineInterface) {
   }
 }
 
+// Closes the pane, turns the bar off (remembered), and stops every sampler
+async function stopAll($: EngineInterface) {
+  isPaneOpen = false
+  await $.store.set(BAR_KEY, false)
+  await update($, isBarOn, () => false)
+  await syncSampler($)
+  prevRusage = undefined
+  prevNet = undefined
+  await $.ui.close({ id: PANE }).catch(() => undefined)
+  return 'Session stats stopped: pane closed, bar off, nothing sampling. /session-stats starts it again.'
+}
+
 async function openPane($: EngineInterface) {
   const opened = await $.ui.open({ id: PANE, title: 'Session stats' })
   if (!opened.isPlaced) return `Session stats pane not shown: ${opened.reason}`
@@ -122,17 +145,23 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'session-stats',
-      description: 'Show live CPU, RAM and processes of this session; "bar" toggles the strip above the prompt',
-      argumentHint: '[bar [on|off]]',
+      description: 'Show live CPU, RAM and processes of this session; "bar" toggles the strip above the prompt, "stop" shuts everything off',
+      argumentHint: '[bar [on|off] | stop]',
     })
     const isOn = (await $.store.get(BAR_KEY)) === true
     await update($, isBarOn, () => isOn)
+    // A reload keeps an open pane open but forgets it here; ask, so it keeps updating
+    isPaneOpen = await $.ui
+      .panes()
+      .then(panes => panes.some(pane => pane.id === PANE))
+      .catch(() => false)
     await syncSampler($)
     return next(e)
   })
 
   on('command.run', { command: 'session-stats' }, async ($, e) => {
     const [sub, arg] = e.args.trim().split(/\s+/)
+    if (sub === 'stop' || sub === 'off' || sub === 'kill') return { text: await stopAll($) }
     if (sub !== 'bar') return { text: await openPane($) }
 
     const isOn = arg === 'on' ? true : arg === 'off' ? false : !(await read($, isBarOn))
@@ -155,7 +184,7 @@ export const register: Register = on => {
     if (e.props.hasSurvey || !(await read($, isBarOn))) return next(e)
 
     const { Button, Text } = $.ui.resolve(e)
-    const { snapshot: s, cpuHistory, ramHistory } = await read($, stats)
+    const { snapshot: s, cpuHistory, ramHistory } = await readStats($)
     const width = e.props.bodyColumns ?? e.viewport?.columns ?? 80
     // "⚙ CPU 100% " + " " + " RAM 10.0G " + " " is 26 cells around the two histories
     const span = Math.max(6, Math.min(BAR_SPAN, Math.floor((width - 26) / 2)))
@@ -178,7 +207,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const { snapshot: s, error, cpuHistory, ramHistory, io, net, netHistory, diskHistory, energyHistory, isRusageAvailable } =
-      await read($, stats)
+      await readStats($)
     const width = e.props.bodyColumns ?? e.viewport?.columns ?? 80
     const noRusage = isRusageAvailable ? null : 'needs the Xcode Command Line Tools'
 
@@ -228,7 +257,7 @@ export const register: Register = on => {
         <Text bold>{'  PID  CPU%   MEM     W NAME'}</Text>
         {s.procs.slice(0, room).map(p => (
           <Text>
-            {pad(String(p.pid), 5)} {pad(p.cpu.toFixed(1), 5)} {pad(gb(p.rssKb) + 'G', 5)} {pad(p.watts === null ? '–' : p.watts.toFixed(2), 5)}{' '}
+            {pad(String(p.pid), 5)} {pad(p.cpu.toFixed(1), 5)} {pad(gb(p.rssKb) + 'G', 5)} {pad(p.watts == null ? '–' : p.watts.toFixed(2), 5)}{' '}
             <Text dimColor={p.cpu < 1}>{('  '.repeat(p.depth) + p.name).slice(0, nameCols)}</Text>
           </Text>
         ))}
