@@ -3,10 +3,14 @@
 A Claude Code mod that shows what your current session is costing your machine.
 Type `/session-stats` and a pane opens with:
 
+![The session-stats pane: CPU, RAM, network, disk and energy with sparklines, then the process tree](docs/pane.png)
+
 - CPU and RAM for the session's whole process tree (the `claude` process plus every
   shell, build, test runner and stdio MCP server it started), with sparklines of up to the last 4 minutes
+- network (down and up), disk (read and write) and energy (watts, and joules since
+  sampling began) for the same tree, each with its own sparkline
 - the session's share of your cores and memory, process count, uptime and load average
-- a process table, indented as a tree, busiest first
+- a process table, indented as a tree, busiest first, with each process's power draw
 
 It samples every 2 seconds while the pane or the bar is showing, and stops when neither is.
 
@@ -14,9 +18,7 @@ It samples every 2 seconds while the pane or the bar is showing, and stops when 
 
 `/session-stats bar` toggles a one-line strip above the prompt:
 
-```
-⚙ CPU  12% ▁▂▂▃▅▃▂▁··········  RAM  0.8G ▃▃▃▄▄▅▅▅··········
-```
+![The session-stats bar above the prompt: CPU and RAM numbers, each followed by a sparkline](docs/bar.png)
 
 Each history is up to 30 cells wide (one minute) from the start and fills left to
 right, then scrolls. Click the strip to open the full pane. The setting is remembered across sessions;
@@ -44,6 +46,12 @@ claude plugin install session-stats --marketplace toml0006/claude-session-stats
 - MCP servers reached over HTTP run outside the session and aren't counted.
 - CPU % is `ps`'s smoothed recent average and can pass 100% on multiple cores.
 - RAM sums each process's resident memory, so shared pages count more than once.
+- Network comes from `nettop`, which takes about 5 seconds per sample, so it updates
+  about every 5 seconds. A background session (`claude --bg`) sends its API traffic
+  through the shared daemon, so that traffic isn't counted under the session.
+- Disk and energy come from `proc_pid_rusage` (what Activity Monitor reads), called
+  through the system `python3`. They need the Xcode Command Line Tools; without them
+  the pane says so rather than triggering an install prompt. Energy needs macOS 13 or later.
 
 ## Develop
 

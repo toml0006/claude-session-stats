@@ -1,8 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Stats } from '../types'
-import { PROBE, gb, parseProbe, sparkline } from './stats'
+import type { Io, Stats } from '../types'
+import type { Counters } from './stats'
+import { NET_PROBE, PROBE, bytes, gb, ioProbe, parseNettop, parseProbe, parseRusage, rates, sparkline } from './stats'
 
 const PANE = 'session-stats'
 const PERIOD_MS = 2000
@@ -15,6 +16,12 @@ const stats = atom({ plugin: 'session-stats', key: 'stats' } as const, {
   error: null,
   cpuHistory: [],
   ramHistory: [],
+  io: null,
+  isRusageAvailable: true,
+  net: null,
+  netHistory: [],
+  diskHistory: [],
+  energyHistory: [],
 } as Stats)
 const isBarOn = atom({ plugin: 'session-stats', key: 'isBarOn' } as const, false)
 
@@ -26,18 +33,69 @@ const ramColor = (kb: number) => (kb >= 4194304 ? 'red' : kb >= 2097152 ? 'yello
 let timer: Timer | undefined
 let isPaneOpen = false
 
+// The previous cumulative counters, to turn the next ones into rates
+let prevRusage: { at: number; counters: Counters } | undefined
+let prevNet: { at: number; counters: Counters } | undefined
+let isNetBusy = false
+
+const push = (list: readonly number[], v: number) => [...list, v].slice(-HISTORY)
+
 async function sample($: EngineInterface) {
   try {
     const { stdout } = await $.process.run(PROBE, { env: { LC_ALL: 'C' }, timeoutMs: 5000 })
     const snap = parseProbe(stdout)
+    const pids = snap.procs.map(p => p.pid)
+
+    const probe = ioProbe(pids)
+    const usage = parseRusage((await $.process.run(probe.argv, { env: probe.env, timeoutMs: 5000 })).stdout)
+    const at = await $.clock.now()
+    let io: Io | null = null
+    let seconds = 0
+    if (prevRusage && usage.size > 0) {
+      seconds = (at - prevRusage.at) / 1000
+      const { total, perPid } = rates(prevRusage.counters, usage, seconds, pids)
+      const hasEnergy = [...usage.values()].every(c => (c[2] ?? -1) >= 0)
+      for (const p of snap.procs) {
+        const r = perPid.get(p.pid)
+        p.watts = r && hasEnergy ? (r[2] ?? 0) / 1e9 : null
+      }
+      const watts = hasEnergy ? (total[2] ?? 0) / 1e9 : 0
+      io = { diskRead: total[0] ?? 0, diskWrite: total[1] ?? 0, watts, hasEnergy, joules: 0 }
+    }
+    prevRusage = usage.size > 0 ? { at, counters: usage } : undefined
+
     await update($, stats, s => ({
+      ...s,
       snapshot: snap,
       error: null,
-      cpuHistory: [...s.cpuHistory, snap.cpu].slice(-HISTORY),
-      ramHistory: [...s.ramHistory, snap.rssKb].slice(-HISTORY),
+      cpuHistory: push(s.cpuHistory, snap.cpu),
+      ramHistory: push(s.ramHistory, snap.rssKb),
+      isRusageAvailable: usage.size > 0,
+      io: io ? { ...io, joules: (s.io?.joules ?? 0) + io.watts * seconds } : s.io,
+      diskHistory: io ? push(s.diskHistory, io.diskRead + io.diskWrite) : s.diskHistory,
+      energyHistory: io?.hasEnergy ? push(s.energyHistory, io.watts) : s.energyHistory,
     }))
+    if (!isNetBusy) void sampleNet($, pids)
   } catch (err) {
     await update($, stats, s => ({ ...s, error: String(err) }))
+  }
+}
+
+async function sampleNet($: EngineInterface, pids: readonly number[]) {
+  isNetBusy = true
+  try {
+    const counters = parseNettop((await $.process.run(NET_PROBE, { timeoutMs: 15000 })).stdout)
+    const at = await $.clock.now()
+    if (prevNet) {
+      const { total } = rates(prevNet.counters, counters, (at - prevNet.at) / 1000, pids)
+      const net = { bytesIn: total[0] ?? 0, bytesOut: total[1] ?? 0 }
+      await update($, stats, s => ({ ...s, net, netHistory: push(s.netHistory, net.bytesIn + net.bytesOut) }))
+    }
+    prevNet = { at, counters }
+  } catch {
+    // Network is a nice-to-have: a failed nettop leaves the last reading
+  } finally {
+    isNetBusy = false
   }
 }
 
@@ -119,16 +177,18 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const { snapshot: s, error, cpuHistory, ramHistory } = await read($, stats)
+    const { snapshot: s, error, cpuHistory, ramHistory, io, net, netHistory, diskHistory, energyHistory, isRusageAvailable } =
+      await read($, stats)
     const width = e.props.bodyColumns ?? e.viewport?.columns ?? 80
+    const noRusage = isRusageAvailable ? null : 'needs the Xcode Command Line Tools'
 
     if (!s) return <Text dimColor>{error ?? 'Sampling…'}</Text>
 
     const machinePct = (s.cpu / s.cores).toFixed(0)
     const ramPct = ((s.rssKb * 1024 * 100) / s.memBytes).toFixed(1)
     const spark = Math.max(10, Math.min(HISTORY, width - 14))
-    const room = Math.max(3, (e.viewport?.rows ?? 30) - 12)
-    const nameCols = Math.max(10, width - 30)
+    const room = Math.max(3, (e.viewport?.rows ?? 30) - 18)
+    const nameCols = Math.max(10, width - 31)
     const pad = (v: string, n: number) => v.padStart(n)
 
     return (
@@ -145,14 +205,30 @@ export const register: Register = on => {
           <Text dimColor> ({ramPct}% of {gb(s.memBytes / 1024)} GB)</Text>
         </Text>
         <Text color="magenta">{sparkline(ramHistory.slice(-spark))}</Text>
+        <Text>
+          <Text bold>NET </Text>
+          {net ? `↓ ${bytes(net.bytesIn)}/s  ↑ ${bytes(net.bytesOut)}/s` : <Text dimColor>measuring…</Text>}
+        </Text>
+        <Text color="blue">{sparkline(netHistory.slice(-spark))}</Text>
+        <Text>
+          <Text bold>DISK </Text>
+          {io ? `read ${bytes(io.diskRead)}/s  write ${bytes(io.diskWrite)}/s` : <Text dimColor>{noRusage ?? 'measuring…'}</Text>}
+        </Text>
+        <Text color="yellow">{sparkline(diskHistory.slice(-spark))}</Text>
+        <Text>
+          <Text bold>ENERGY </Text>
+          {io?.hasEnergy ? `${io.watts.toFixed(2)} W` : <Text dimColor>{io ? 'needs macOS 13 or later' : noRusage ?? 'measuring…'}</Text>}
+          {io?.hasEnergy && <Text dimColor> ({io.joules.toFixed(0)} J since sampling began)</Text>}
+        </Text>
+        <Text color="red">{sparkline(energyHistory.slice(-spark))}</Text>
         <Text dimColor>
           {s.procs.length} processes · session pid {s.rootPid} up {s.procs[0]?.elapsed} · load {s.load.map(l => l.toFixed(2)).join(' ')}
         </Text>
         <Text> </Text>
-        <Text bold>{'  PID   CPU%    MEM  NAME'}</Text>
+        <Text bold>{'  PID  CPU%   MEM     W NAME'}</Text>
         {s.procs.slice(0, room).map(p => (
           <Text>
-            {pad(String(p.pid), 5)} {pad(p.cpu.toFixed(1), 6)} {pad(gb(p.rssKb) + 'G', 6)}{'  '}
+            {pad(String(p.pid), 5)} {pad(p.cpu.toFixed(1), 5)} {pad(gb(p.rssKb) + 'G', 5)} {pad(p.watts === null ? '–' : p.watts.toFixed(2), 5)}{' '}
             <Text dimColor={p.cpu < 1}>{('  '.repeat(p.depth) + p.name).slice(0, nameCols)}</Text>
           </Text>
         ))}
